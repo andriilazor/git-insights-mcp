@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-git-insights-mcp = "git_insights:main"
+git-insights-mcp = "git_insights.server:main"
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14.0"]
