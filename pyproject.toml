@@ -1,17 +1,48 @@
 [project]
 name = "git-insights-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "A read-only MCP server that answers questions about a local Git repository's history."
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "AndriyLazor", email = "andriy.lazor77@gmail.com" }
 ]
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=2,<3",
+]
 
 [project.scripts]
-git-insights-mcp = "git_insights_mcp:main"
+git-insights-mcp = "git_insights:main"
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "git_insights"
+
+[dependency-groups]
+dev = [
+    "inline-snapshot>=0.36.1",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
