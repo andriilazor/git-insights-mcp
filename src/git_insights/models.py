@@ -78,3 +78,39 @@ class FileHistoryResult(BaseModel):
     repo: str
     path: str
     commits: list[FileCommit] = Field(description="Newest first")
+
+
+class CoupledFile(BaseModel):
+    path: str
+    co_changes: int = Field(description="Commits that changed both files")
+    ratio: float = Field(description="co_changes / commits that changed the given file")
+
+
+class CoupledFilesResult(BaseModel):
+    repo: str
+    path: str
+    file_commits: int = Field(description="Non-merge commits that changed the given file")
+    coupled: list[CoupledFile] = Field(description="Ranked by co_changes, then path")
+
+
+class ChangelogEntry(BaseModel):
+    sha: str
+    author: str
+    subject: str = Field(description="Original commit subject")
+    description: str = Field(description="Subject without the conventional-commit prefix")
+    scope: str | None
+    breaking: bool = Field(description="Marked with '!' after the type or scope")
+
+
+class ChangelogSection(BaseModel):
+    type: str = Field(description="Conventional-commit type, or 'other'")
+    title: str
+    entries: list[ChangelogEntry] = Field(description="Newest first")
+
+
+class ChangelogResult(BaseModel):
+    repo: str
+    from_ref: str
+    to_ref: str
+    total_commits: int
+    sections: list[ChangelogSection] = Field(description="Non-empty sections in a fixed order")

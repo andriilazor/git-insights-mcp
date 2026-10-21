@@ -19,6 +19,11 @@ from git_insights.models import (
     AuthorActivity,
     AuthorActivityResult,
     AuthorCount,
+    ChangelogEntry,
+    ChangelogResult,
+    ChangelogSection,
+    CoupledFile,
+    CoupledFilesResult,
     ExtensionCount,
     FileCommit,
     FileHistoryResult,
@@ -32,6 +37,16 @@ class GitRunner(Protocol):
     """``run_git`` with the repository and limits already bound."""
 
     def __call__(self, args: Sequence[str], /) -> Awaitable[str]: ...
+
+
+class ProgressCallback(Protocol):
+    """Receives absolute progress: ``done`` out of ``total``."""
+
+    def __call__(self, done: float, total: float, message: str, /) -> Awaitable[None]: ...
+
+
+async def _no_progress(done: float, total: float, message: str) -> None:
+    pass
 
 
 # Record separator before each commit, unit separator between header fields.
@@ -199,16 +214,27 @@ def compute_hotspots(commits: Iterable[CommitRecord], limit: int) -> list[Hotspo
 
 
 async def hotspots(
-    git: GitRunner, repo: str, *, since: date | None, until: date | None, limit: int
+    git: GitRunner,
+    repo: str,
+    *,
+    since: date | None,
+    until: date | None,
+    limit: int,
+    progress: ProgressCallback | None = None,
 ) -> HotspotsResult:
+    report = progress or _no_progress
+    await report(0, 2, "Reading git history")
     commits = await read_log(git, since=since, until=until)
-    return HotspotsResult(
+    await report(1, 2, f"Ranking files from {len(commits)} commits")
+    result = HotspotsResult(
         repo=repo,
         since=since,
         until=until,
         total_commits=len(commits),
         hotspots=compute_hotspots(commits, limit),
     )
+    await report(2, 2, "Done")
+    return result
 
 
 # --- author_activity -----------------------------------------------------------
@@ -257,3 +283,106 @@ async def file_history(git: GitRunner, repo: str, path: str, *, limit: int) -> F
             )
         )
     return FileHistoryResult(repo=repo, path=path, commits=history)
+
+
+# --- coupled_files ---------------------------------------------------------------
+
+
+def compute_coupling(
+    commits: Iterable[CommitRecord], path: str, limit: int
+) -> tuple[int, list[CoupledFile]]:
+    """Count how often each other file appears in the commits that changed ``path``."""
+    file_commits = 0
+    counts: Counter[str] = Counter()
+    for commit in commits:
+        paths = {f.path for f in commit.files}
+        if path not in paths:
+            continue
+        file_commits += 1
+        counts.update(paths - {path})
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    return file_commits, [
+        CoupledFile(path=other, co_changes=n, ratio=round(n / file_commits, 2))
+        for other, n in ranked
+    ]
+
+
+async def coupled_files(git: GitRunner, repo: str, path: str, *, limit: int) -> CoupledFilesResult:
+    """``path`` must already be validated with ``security.validate_file_path``."""
+    # --full-diff keeps every file of the matching commits, not only ``path``.
+    commits = await read_log(git, extra=["--full-diff"], paths=[path])
+    file_commits, coupled = compute_coupling(commits, path, limit)
+    return CoupledFilesResult(repo=repo, path=path, file_commits=file_commits, coupled=coupled)
+
+
+# --- draft_changelog -------------------------------------------------------------
+
+_CONVENTIONAL_RE = re.compile(
+    r"^(?P<type>[A-Za-z]+)(?:\((?P<scope>[^()]*)\))?(?P<breaking>!)?:\s+(?P<description>.+)$"
+)
+# Section order of the changelog; anything else lands in "other".
+CHANGELOG_SECTIONS = {
+    "feat": "Features",
+    "fix": "Bug Fixes",
+    "perf": "Performance",
+    "refactor": "Refactoring",
+    "docs": "Documentation",
+    "test": "Tests",
+    "build": "Build",
+    "ci": "CI",
+    "style": "Style",
+    "chore": "Chores",
+    "revert": "Reverts",
+    "other": "Other",
+}
+
+
+def group_changelog(commits: Iterable[tuple[str, str, str]]) -> list[ChangelogSection]:
+    """Group ``(sha, author, subject)`` tuples by conventional-commit type."""
+    grouped: dict[str, list[ChangelogEntry]] = {}
+    for sha, author, subject in commits:
+        match = _CONVENTIONAL_RE.match(subject)
+        kind = match["type"].lower() if match else "other"
+        if match and kind in CHANGELOG_SECTIONS:
+            entry = ChangelogEntry(
+                sha=sha,
+                author=author,
+                subject=subject,
+                description=match["description"],
+                scope=match["scope"] or None,
+                breaking=bool(match["breaking"]),
+            )
+        else:
+            kind = "other"
+            entry = ChangelogEntry(
+                sha=sha,
+                author=author,
+                subject=subject,
+                description=subject,
+                scope=None,
+                breaking=False,
+            )
+        grouped.setdefault(kind, []).append(entry)
+    return [
+        ChangelogSection(type=kind, title=title, entries=grouped[kind])
+        for kind, title in CHANGELOG_SECTIONS.items()
+        if kind in grouped
+    ]
+
+
+async def draft_changelog(git: GitRunner, repo: str, from_ref: str, to_ref: str) -> ChangelogResult:
+    """Refs must already be validated with ``security.validate_ref``."""
+    out = await git(
+        ["log", "--no-merges", f"--format=%H{_US}%an{_US}%s", f"{from_ref}..{to_ref}", "--"]
+    )
+    commits = [
+        (sha, author, subject)
+        for sha, author, subject in (line.split(_US, 2) for line in out.splitlines() if line)
+    ]
+    return ChangelogResult(
+        repo=repo,
+        from_ref=from_ref,
+        to_ref=to_ref,
+        total_commits=len(commits),
+        sections=group_changelog(commits),
+    )

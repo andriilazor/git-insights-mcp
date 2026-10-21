@@ -10,10 +10,12 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 from git_insights import analysis
 from git_insights.analysis import GitRunner
 from git_insights.git import run_git
+from git_insights.models import ChangelogResult
 
 
 @pytest.fixture
@@ -151,3 +153,107 @@ async def test_file_history_of_untouched_path_is_empty(git: GitRunner) -> None:
     result = await analysis.file_history(git, "demo", "nope.txt", limit=10)
 
     assert result.commits == []
+
+
+# --- hotspots progress -----------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_hotspots_reports_progress_up_to_total(git: GitRunner) -> None:
+    calls: list[tuple[float, float]] = []
+
+    async def progress(done: float, total: float, message: str) -> None:
+        calls.append((done, total))
+
+    await analysis.hotspots(git, "demo", since=None, until=None, limit=10, progress=progress)
+
+    assert [done for done, _ in calls] == sorted(done for done, _ in calls)
+    assert calls[0][0] == 0
+    assert calls[-1][0] == calls[-1][1]
+    assert len({total for _, total in calls}) == 1
+
+
+# --- coupled_files ---------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_coupled_files(git: GitRunner) -> None:
+    result = await analysis.coupled_files(git, "demo", "src/app.py", limit=10)
+
+    assert result.path == "src/app.py"
+    assert result.file_commits == 4
+    assert [(c.path, c.co_changes, c.ratio) for c in result.coupled] == [
+        ("src/auth.py", 3, 0.75),
+        ("README.md", 1, 0.25),
+        ("config.yaml", 1, 0.25),
+    ]
+
+
+@pytest.mark.anyio
+async def test_coupled_files_limit(git: GitRunner) -> None:
+    result = await analysis.coupled_files(git, "demo", "src/app.py", limit=1)
+
+    assert [c.path for c in result.coupled] == ["src/auth.py"]
+
+
+@pytest.mark.anyio
+async def test_coupled_files_of_untouched_path(git: GitRunner) -> None:
+    result = await analysis.coupled_files(git, "demo", "nope.txt", limit=10)
+
+    assert result.file_commits == 0
+    assert result.coupled == []
+
+
+# --- draft_changelog -------------------------------------------------------------
+
+
+def _changelog_view(result: ChangelogResult) -> list[tuple[str, list[tuple[str, str | None]]]]:
+    return [
+        (section.type, [(e.description, e.scope) for e in section.entries])
+        for section in result.sections
+    ]
+
+
+@pytest.mark.anyio
+async def test_draft_changelog_between_tags(git: GitRunner) -> None:
+    result = await analysis.draft_changelog(git, "demo", "v1.0", "v1.1")
+
+    assert result.total_commits == 3
+    assert _changelog_view(result) == [
+        ("feat", [("add config loader", None)]),
+        ("docs", [("update readme", None)]),
+        ("other", [("refactor auth module", None)]),
+    ]
+
+
+@pytest.mark.anyio
+async def test_draft_changelog_scopes(git: GitRunner) -> None:
+    result = await analysis.draft_changelog(git, "demo", "HEAD~5", "v1.0")
+
+    assert _changelog_view(result) == [
+        ("feat", [("add login", "auth")]),
+        ("fix", [("handle empty password", "auth")]),
+    ]
+
+
+@pytest.mark.anyio
+async def test_draft_changelog_unknown_ref(git: GitRunner) -> None:
+    with pytest.raises(ToolError, match="no-such-tag"):
+        await analysis.draft_changelog(git, "demo", "no-such-tag", "HEAD")
+
+
+def test_group_changelog_breaking_unknown_type_and_case() -> None:
+    commits = [
+        ("a" * 40, "Ann", "feat(api)!: drop v1 endpoints"),
+        ("b" * 40, "Ann", "wip: half done"),
+        ("c" * 40, "Ann", "Fix: typo"),
+        ("d" * 40, "Ann", "Merge-free subject without type"),
+    ]
+
+    sections = analysis.group_changelog(commits)
+
+    assert [(s.type, [(e.description, e.breaking) for e in s.entries]) for s in sections] == [
+        ("feat", [("drop v1 endpoints", True)]),
+        ("fix", [("typo", False)]),
+        ("other", [("wip: half done", False), ("Merge-free subject without type", False)]),
+    ]
