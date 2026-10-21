@@ -1,0 +1,18 @@
+# Example: serve one repository over streamable HTTP on http://localhost:8000/mcp
+#
+#   cp .env.example .env      # then set GIT_INSIGHTS_TOKEN and REPO_PATH
+#   docker compose up --build
+services:
+  git-insights:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      GIT_INSIGHTS_REPOS: "app=/repos/app"
+      GIT_INSIGHTS_TOKEN: "${GIT_INSIGHTS_TOKEN:?set GIT_INSIGHTS_TOKEN in .env}"
+      GIT_INSIGHTS_ALLOWED_HOSTS: "localhost:8000,127.0.0.1:8000"
+    volumes:
+      - "${REPO_PATH:-.}:/repos/app:ro"
+    read_only: true
+    tmpfs:
+      - /tmp

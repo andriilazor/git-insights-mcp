@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, types and tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run mypy
+      - run: uv run pytest
+
+  docker:
+    name: Docker image over HTTP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t git-insights-mcp .
+      - name: Run with this repository mounted read-only
+        run: |
+          docker run -d --name git-insights -p 127.0.0.1:8000:8000 \
+            -v "$PWD:/repos/self:ro" \
+            -e GIT_INSIGHTS_REPOS=self=/repos/self \
+            -e GIT_INSIGHTS_TOKEN=ci-token \
+            -e GIT_INSIGHTS_ALLOWED_HOSTS=localhost:8000,127.0.0.1:8000 \
+            git-insights-mcp
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:8000/mcp && break
+            sleep 1
+          done
+      - name: Unauthenticated request is rejected, authenticated tool call works
+        run: |
+          set -euo pipefail
+          url=http://127.0.0.1:8000/mcp
+          headers=(-H "content-type: application/json" -H "accept: application/json, text/event-stream")
+          init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$url" "${headers[@]}" -d "$init")
+          test "$status" = 401
+
+          auth=(-H "authorization: Bearer ci-token")
+          session=$(curl -s -D - -o /dev/null -X POST "$url" "${headers[@]}" "${auth[@]}" -d "$init" \
+            | awk 'tolower($1) == "mcp-session-id:" {print $2}' | tr -d '\r')
+          test -n "$session"
+          state=(-H "mcp-session-id: $session" -H "mcp-protocol-version: 2025-06-18")
+          curl -s -X POST "$url" "${headers[@]}" "${auth[@]}" "${state[@]}" \
+            -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+          result=$(curl -s -X POST "$url" "${headers[@]}" "${auth[@]}" "${state[@]}" \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"repo_summary","arguments":{"repo":"self"}}}')
+          echo "$result"
+          echo "$result" | grep -q '"commit_count"'
+      - if: always()
+        run: docker logs git-insights
