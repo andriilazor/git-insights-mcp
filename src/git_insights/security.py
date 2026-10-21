@@ -1,11 +1,14 @@
-"""Repository allowlist and validation of everything a client can pass to git."""
+"""Repository allowlist, validation of everything a client can pass to git, and the
+bearer-token verifier for the HTTP transport."""
 
 from __future__ import annotations
 
+import hmac
 import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
+from mcp.server.auth.provider import AccessToken
 from mcp.server.mcpserver.exceptions import ToolError
 
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -88,3 +91,20 @@ def validate_file_path(root: Path, path: str) -> str:
     if not resolved.is_relative_to(resolved_root):
         raise ToolError(f"File path {path[:50]!r} points outside the repository")
     return normalized
+
+
+class StaticTokenVerifier:
+    """``TokenVerifier`` that accepts exactly one pre-shared bearer token.
+
+    The comparison is constant-time so response timing does not leak the token.
+    """
+
+    def __init__(self, token: str) -> None:
+        if not token:
+            raise ValueError("A non-empty token is required")
+        self._token = token.encode()
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if hmac.compare_digest(token.encode(), self._token):
+            return AccessToken(token=token, client_id="git-insights-client", scopes=[])
+        return None

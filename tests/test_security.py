@@ -12,7 +12,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from git_insights.config import load_settings
 from git_insights.git import run_git
-from git_insights.security import RepoRegistry, resolve_repos, validate_file_path, validate_ref
+from git_insights.security import (
+    RepoRegistry,
+    StaticTokenVerifier,
+    resolve_repos,
+    validate_file_path,
+    validate_ref,
+)
 
 # --- configuration -----------------------------------------------------------
 
@@ -206,3 +212,42 @@ async def test_run_git_kills_slow_git(
     with pytest.raises(ToolError, match="timed out"):
         await run_git(git_repo, ["log"], timeout=0.3, max_output_bytes=1000)
     assert time.monotonic() - started < 5
+
+
+# --- HTTP settings and token verifier ------------------------------------------
+
+
+def test_load_settings_reads_http_options() -> None:
+    settings = load_settings(
+        {
+            "GIT_INSIGHTS_REPOS": "app=/srv/app",
+            "GIT_INSIGHTS_TOKEN": "s3cret",
+            "GIT_INSIGHTS_ISSUER_URL": "https://auth.example.com",
+            "GIT_INSIGHTS_ALLOWED_HOSTS": "git-insights:8000, localhost:*",
+        }
+    )
+    assert settings.token == "s3cret"
+    assert settings.issuer_url == "https://auth.example.com"
+    assert settings.allowed_hosts == ["git-insights:8000", "localhost:*"]
+
+
+def test_load_settings_http_options_are_optional() -> None:
+    settings = load_settings({"GIT_INSIGHTS_REPOS": "app=/srv/app", "GIT_INSIGHTS_TOKEN": ""})
+    assert settings.token is None
+    assert settings.allowed_hosts == []
+
+
+@pytest.mark.anyio
+async def test_static_token_verifier() -> None:
+    verifier = StaticTokenVerifier("s3cret")
+
+    accepted = await verifier.verify_token("s3cret")
+    assert accepted is not None and accepted.token == "s3cret"
+    assert await verifier.verify_token("s3cret ") is None
+    assert await verifier.verify_token("wrong") is None
+    assert await verifier.verify_token("") is None
+
+
+def test_static_token_verifier_requires_a_token() -> None:
+    with pytest.raises(ValueError):
+        StaticTokenVerifier("")

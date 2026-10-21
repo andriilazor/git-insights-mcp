@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeVar
 
 DEFAULT_GIT_TIMEOUT = 10.0
 DEFAULT_MAX_OUTPUT_BYTES = 5_000_000
+# Stand-in issuer: the server checks a static token and never issues one itself.
+DEFAULT_ISSUER_URL = "http://localhost"
 
 _Number = TypeVar("_Number", int, float)
 
@@ -27,6 +29,12 @@ class Settings:
     """Seconds a single git call may run before it is killed."""
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
     """Largest stdout a single git call may produce."""
+    token: str | None = None
+    """Bearer token the streamable-http transport requires."""
+    issuer_url: str = DEFAULT_ISSUER_URL
+    """Authorization server advertised to HTTP clients (a stand-in; see the README)."""
+    allowed_hosts: list[str] = field(default_factory=list)
+    """Host header values the HTTP transport accepts, e.g. ``git-insights:8000`` or ``host:*``."""
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -41,6 +49,13 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         max_output_bytes=_positive(
             env, "GIT_INSIGHTS_MAX_OUTPUT_BYTES", int, DEFAULT_MAX_OUTPUT_BYTES
         ),
+        token=env.get("GIT_INSIGHTS_TOKEN") or None,
+        issuer_url=env.get("GIT_INSIGHTS_ISSUER_URL") or DEFAULT_ISSUER_URL,
+        allowed_hosts=[
+            host.strip()
+            for host in env.get("GIT_INSIGHTS_ALLOWED_HOSTS", "").split(",")
+            if host.strip()
+        ],
     )
 
 

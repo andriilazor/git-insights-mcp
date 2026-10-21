@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Annotated, Any, TypeVar
 
 from mcp.server import MCPServer
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError, ToolError
 from mcp.server.mcpserver.prompts import base
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -35,7 +37,13 @@ from git_insights.models import (
     HotspotsResult,
     RepoSummary,
 )
-from git_insights.security import RepoRegistry, resolve_repos, validate_file_path, validate_ref
+from git_insights.security import (
+    RepoRegistry,
+    StaticTokenVerifier,
+    resolve_repos,
+    validate_file_path,
+    validate_ref,
+)
 
 logger = logging.getLogger("git_insights")
 
@@ -118,13 +126,24 @@ class App:
         )
 
 
-def create_server(settings: Settings | None = None) -> MCPServer:
+def create_server(settings: Settings | None = None, *, require_auth: bool = False) -> MCPServer:
     """Build the MCP server.
 
     With ``settings`` the configuration is validated immediately. Without, it is read
     from the environment on first use, so the module-level ``mcp`` object below can be
     imported by ``mcp dev`` / ``mcp run`` before the environment is checked.
+
+    ``require_auth`` protects the HTTP transport with the bearer token from
+    ``settings.token``; it raises ``ValueError`` when no token is configured.
     """
+    auth_options: dict[str, Any] = {}
+    if require_auth:
+        if settings is None or not settings.token:
+            raise ValueError("GIT_INSIGHTS_TOKEN is required for the streamable-http transport")
+        auth_options = {
+            "token_verifier": StaticTokenVerifier(settings.token),
+            "auth": AuthSettings(issuer_url=settings.issuer_url, resource_server_url=None),
+        }
     state: list[App] = [App(settings)] if settings is not None else []
 
     def app() -> App:
@@ -135,7 +154,7 @@ def create_server(settings: Settings | None = None) -> MCPServer:
                 raise ToolError(f"Server is not configured: {err}") from None
         return state[0]
 
-    mcp = MCPServer("git-insights", instructions=INSTRUCTIONS)
+    mcp = MCPServer("git-insights", instructions=INSTRUCTIONS, **auth_options)
 
     # --- tools -------------------------------------------------------------------
 
@@ -316,6 +335,33 @@ modules to split, people to pair with."""
 # Module-level server for `mcp dev` / `mcp run`; configuration is read on first use.
 mcp = create_server()
 
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def http_run_options(settings: Settings, *, host: str, port: int) -> dict[str, Any]:
+    """Keyword arguments for ``MCPServer.run(transport="streamable-http", ...)``.
+
+    With ``settings.allowed_hosts`` the Host (and Origin) headers are checked against
+    that list on any bind address. Without it the SDK protects localhost binds only,
+    so a non-local bind without allowed hosts is logged as a warning.
+    """
+    transport_security = None
+    if settings.allowed_hosts:
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(settings.allowed_hosts),
+            allowed_origins=[
+                f"{scheme}://{allowed}"
+                for allowed in settings.allowed_hosts
+                for scheme in ("http", "https")
+            ],
+        )
+    elif host not in _LOCAL_HOSTS:
+        logger.warning(
+            "Binding to %s without GIT_INSIGHTS_ALLOWED_HOSTS: Host headers are not checked", host
+        )
+    return {"host": host, "port": port, "transport_security": transport_security}
+
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Command-line entry point: ``git-insights-mcp [--transport ...] [--host] [--port]``."""
@@ -335,16 +381,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    http = args.transport == "streamable-http"
     try:
-        server = create_server(load_settings())
+        settings = load_settings()
+        server = create_server(settings, require_auth=http)
     except ValueError as err:
         parser.exit(2, f"git-insights-mcp: {err}\n")
 
-    kwargs: dict[str, Any] = {}
-    if args.transport == "streamable-http":
-        kwargs = {"host": args.host, "port": args.port}
     logger.info("Starting git-insights-mcp over %s", args.transport)
-    server.run(args.transport, **kwargs)
+    if http:
+        server.run("streamable-http", **http_run_options(settings, host=args.host, port=args.port))
+    else:
+        server.run("stdio")
 
 
 if __name__ == "__main__":
